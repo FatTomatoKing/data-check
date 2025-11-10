@@ -1,0 +1,20 @@
+{
+  "cds": {
+    "host": "192.168.8.143",
+    "port": 3306,
+    "user": "suyh_cdap_cds",
+    "password": "suyh_cdap_cds",
+    "database": "suyh_cdap_cds"
+  },
+  "cds_pg": {
+    "host": "192.168.8.143",
+    "port": 5432,
+    "user": "suyh_pg_cdap_cds",
+    "password": "suyh_pg_cdap_cds",
+    "database": "suyh_pg_cdap_cds"
+  },
+   "params": {
+    "date": 20220109,
+    "channels":  ["inr_subch_1702499"]
+  }
+}
