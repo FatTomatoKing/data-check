@@ -9,6 +9,7 @@ import openpyxl
 import pytz
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session
+from openpyxl.styles import Alignment
 
 tz = pytz.timezone("Asia/Kolkata")
 
@@ -84,7 +85,7 @@ class CdapAdsValidation:
               hact.day_recharge,
               COALESCE(hacfd.channel_threshold_value, 
                 (SELECT channel_threshold_value FROM history_active_channel_config 
-                 WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value   
+                 WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value
             FROM history_active_cohort_cost_calculate_trend hact
             LEFT JOIN history_active_channel_config_detail hacfd ON hact.channel = hacfd.channel 
             WHERE hact.channel = :channel
@@ -115,7 +116,7 @@ class CdapAdsValidation:
         """处理CDAP数据：按dates+channel+campaign_id分组计算花费"""
         if not results:
             return results
-        
+
         logger.info("开始处理CDAP数据花费计算（按dates+channel+campaign_id分组）")
         
         # 按 dates + channel + campaign_id 进行分组，用于确定花费分配逻辑
@@ -136,6 +137,7 @@ class CdapAdsValidation:
         # 为每个分组计算花费（每个分组只计算一次）
         group_costs = {}
         channel_pn_cache = {}  # 缓存channel对应的pn，避免重复查询
+        channel_total_cost_cache = {}  # 缓存channel总花费，避免重复查询
         
         for key, group_rows in group_map.items():
             base_row = group_rows[0]  # 使用第一行获取基本信息
@@ -147,6 +149,28 @@ class CdapAdsValidation:
             if channel not in channel_pn_cache:
                 channel_pn_cache[channel] = self.get_pn_by_channel(channel)
             pn = channel_pn_cache[channel]
+            
+            # 查询channel总花费（使用缓存避免重复查询）
+            if channel not in channel_total_cost_cache:
+                channel_total_cost = self.query_channel_total_cost(dates, channel)
+                # 转换为USD
+                if channel_total_cost > 0 and pn:
+                    channel_total_cost_usd_info = self.currency_to_usd_with_details(dates, channel_total_cost, pn)
+                    channel_total_cost_cache[channel] = {
+                        'cost_usd': channel_total_cost_usd_info['cost_usd'],
+                        'original_cost': channel_total_cost,
+                        'currency': channel_total_cost_usd_info['currency'],
+                        'rate': channel_total_cost_usd_info['rate'],
+                        'extra_rate': channel_total_cost_usd_info['extra_rate']
+                    }
+                else:
+                    channel_total_cost_cache[channel] = {
+                        'cost_usd': 0.0,
+                        'original_cost': 0.0,
+                        'currency': None,
+                        'rate': None,
+                        'extra_rate': None
+                    }
             
             # 计算这个分组的花费 - 添加channel条件
             cost_info = self.calculate_campaign_cost_with_channel_details(dates, campaign_id, channel, pn)
@@ -224,15 +248,20 @@ class CdapAdsValidation:
             
             # 重新构建行数据，添加花费信息和day_recharge信息
             # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, threshold_value
-            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value, 花费USD, 原始花费, Day_Recharge, Day_Recharge_USD, 币种, 汇率, 额外系数
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, CDAP实际使用, 原始花费（CDAP实际使用）, 花费USD, 原始花费, 日充值美元, 日充值原始币种, 币种, 汇率, 额外系数, history_active_offset_days, threshold_value
             
             reordered_row = []
-            reordered_row.extend(row[:8])  # table_name 到 history_active_offset_days
-            reordered_row.append(row[9])  # threshold_value (跳过day_recharge字段)
+            reordered_row.extend(row[:7])  # table_name 到 active
+            
+            # 获取channel总花费信息
+            channel_total_info = channel_total_cost_cache[channel]
+            reordered_row.append(channel_total_info['cost_usd'])  # CDAP实际使用
+            reordered_row.append(channel_total_info['original_cost'])  # 原始花费（CDAP实际使用）
+            
             reordered_row.append(cost_info['cost_usd'])  # 花费USD
             reordered_row.append(cost_info['original_cost'])  # 原始花费
-            reordered_row.append(day_recharge)  # Day_Recharge (原始值)
-            reordered_row.append(recharge_conversion['cost_usd'])  # Day_Recharge_USD
+            reordered_row.append(recharge_conversion['cost_usd'])  # 日充值美元
+            reordered_row.append(day_recharge)  # 日充值原始币种
             
             # 优先使用recharge_conversion的币种信息，如果没有则使用cost_info的
             currency = recharge_conversion['currency'] if recharge_conversion['currency'] else cost_info['currency']
@@ -242,6 +271,8 @@ class CdapAdsValidation:
             reordered_row.append(currency)  # 币种
             reordered_row.append(rate)  # 汇率
             reordered_row.append(extra_rate)  # 额外系数
+            reordered_row.append(row[7])  # history_active_offset_days
+            reordered_row.append(row[9])  # threshold_value
             
             processed_results.append(tuple(reordered_row))
         
@@ -354,14 +385,38 @@ class CdapAdsValidation:
         
         # 为每个分组计算花费（每个分组只计算一次）
         group_costs = {}
+        channel_total_cost_cache = {}  # 缓存channel总花费，避免重复查询
+        
         for key, group_rows in group_map.items():
             base_row = group_rows[0]  # 使用第一行获取基本信息
             campaign_id = base_row[5]
             dates = base_row[1]
             pn = base_row[9]  # 获取pn字段
+            channel = base_row[3]  # 获取channel信息
+            
+            # 查询channel总花费（使用缓存避免重复查询）
+            if channel not in channel_total_cost_cache:
+                channel_total_cost = self.query_channel_total_cost(dates, channel)
+                # 转换为USD
+                if channel_total_cost > 0 and pn:
+                    channel_total_cost_usd_info = self.currency_to_usd_with_details(dates, channel_total_cost, pn)
+                    channel_total_cost_cache[channel] = {
+                        'cost_usd': channel_total_cost_usd_info['cost_usd'],
+                        'original_cost': channel_total_cost,
+                        'currency': channel_total_cost_usd_info['currency'],
+                        'rate': channel_total_cost_usd_info['rate'],
+                        'extra_rate': channel_total_cost_usd_info['extra_rate']
+                    }
+                else:
+                    channel_total_cost_cache[channel] = {
+                        'cost_usd': 0.0,
+                        'original_cost': 0.0,
+                        'currency': None,
+                        'rate': None,
+                        'extra_rate': None
+                    }
             
             # 计算这个分组的花费 - 使用带channel条件的方法
-            channel = base_row[3]  # 获取channel信息
             cost_info = self.calculate_campaign_cost_with_channel_details(dates, campaign_id, channel, pn)
             group_costs[key] = cost_info
             logger.info(f"分组 {key} 花费计算: {cost_info['cost_usd']} USD")
@@ -429,19 +484,19 @@ class CdapAdsValidation:
                         'currency': None,
                         'rate': None,
                         'extra_rate': None
-                    }
+                }
             
             # 重新构建行数据，调整字段顺序（保持明细数据结构，但不输出pn字段）
             # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, pn, threshold_value
-            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value, 花费USD, 原始花费, Day_Recharge, Day_Recharge_USD, 花费币种, 花费汇率, 花费额外系数
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, 花费USD, 原始花费, 日充值美元, 日充值原始币种, 币种, 汇率, 额外系数, history_active_offset_days, threshold_value
             
             reordered_row = []
-            reordered_row.extend(row[:8])  # table_name 到 history_active_offset_days
-            reordered_row.append(row[10])  # threshold_value (跳过pn字段)
+            reordered_row.extend(row[:7])  # table_name 到 active
+            
             reordered_row.append(cost_info['cost_usd'])  # 花费USD
             reordered_row.append(cost_info['original_cost'])  # 原始花费
-            reordered_row.append(day_recharge)  # Day_Recharge (原始值)
-            reordered_row.append(recharge_conversion['cost_usd'])  # Day_Recharge_USD
+            reordered_row.append(recharge_conversion['cost_usd'])  # 日充值美元
+            reordered_row.append(day_recharge)  # 日充值原始币种
             
             # 优先使用recharge_conversion的币种信息，如果没有则使用cost_info的
             currency = recharge_conversion['currency'] if recharge_conversion['currency'] else cost_info['currency']
@@ -451,6 +506,8 @@ class CdapAdsValidation:
             reordered_row.append(currency)  # 币种
             reordered_row.append(rate)  # 汇率
             reordered_row.append(extra_rate)  # 额外系数
+            reordered_row.append(row[7])  # history_active_offset_days
+            reordered_row.append(row[10])  # threshold_value (跳过pn字段)
             
             processed_results.append(tuple(reordered_row))
         
@@ -572,6 +629,24 @@ class CdapAdsValidation:
         finally:
             session.close()
 
+    def query_channel_total_cost(self, dates, channel):
+        """查询Channel总花费 - 按channel查询adjust_cost_record表的总花费"""
+        if not channel or channel.strip() == '':
+            return 0.0
+            
+        sql = text("SELECT SUM(cost) FROM adjust_cost_record WHERE dates = :dates AND channel = :channel")
+        
+        try:
+            session = self.cds_pg_session()  # 使用PG连接
+            result = session.execute(sql, {"dates": dates, "channel": channel}).fetchone()
+            cost = result[0] if result and result[0] is not None else 0.0
+            return float(cost)
+        except Exception as e:
+            logger.error(f"查询Channel {channel} 总花费失败: {e}")
+            return 0.0
+        finally:
+            session.close()
+    
     def query_campaign_cost(self, dates, campaign_id):
         """查询Campaign花费 - 对应 adjustCostRecordService.sumCost"""
         if not campaign_id or campaign_id.strip() == '':
@@ -746,7 +821,7 @@ class CdapAdsValidation:
             return None
         finally:
             session.close()
-
+    
     def get_currency_by_pn(self, pn):
         """根据pn获取货币类型 - 查询project_currency_config表"""
         sql = text("""
@@ -805,23 +880,63 @@ class CdapAdsValidation:
         # 1. CDAP基础数据详情（带花费信息和day_recharge）
         cdap_base_sheet = wb.create_sheet('CDAP-Roas报表查询结果明细')
         base_headers = [
-            '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', 
-            '历史活跃偏移天数', '阈值', '花费USD', '原始花费', 'Day_Recharge', 'Day_Recharge_USD', '币种', '汇率', '额外系数'
+            '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
+            'CDAP实际使用', '原始花费（CDAP实际使用）', '花费USD', '原始花费', '日充值美元', '日充值原始币种', '币种', '汇率', '额外系数', '历史活跃偏移天数', '阈值'
         ]
         cdap_base_sheet.append(base_headers)
 
+        # 添加数据并处理单元格合并
+        current_row = 2  # 从第2行开始（第1行是表头）
         for result in validation_results:
+            channel_merge_info = {}  # 记录每个channel的合并信息
+            
+            # 先添加所有数据
             for row in result['cdap_base_data']:
                 cdap_base_sheet.append(list(row))
+
+                # 记录需要合并的channel信息
+                channel = row[3]  # 渠道在第4列（索引3）
+                cdap_actual_cost = row[7]  # CDAP实际使用在第8列（索引7）
+                original_cost = row[8]  # 原始花费（CDAP实际使用）在第9列（索引8）
+                
+                if channel not in channel_merge_info:
+                    channel_merge_info[channel] = {
+                        'start_row': current_row,
+                        'end_row': current_row,
+                        'cdap_actual_cost': cdap_actual_cost,
+                        'original_cost': original_cost
+                    }
+                else:
+                    channel_merge_info[channel]['end_row'] = current_row
+                
+                current_row += 1
+            
+            # 执行单元格合并
+            for channel, info in channel_merge_info.items():
+                if info['start_row'] < info['end_row']:  # 只有多行时才合并
+                    # 合并CDAP实际使用列（第8列，H列）
+                    cdap_base_sheet.merge_cells(f'H{info["start_row"]}:H{info["end_row"]}')
+                    # 合并原始花费（CDAP实际使用）列（第9列，I列）
+                    cdap_base_sheet.merge_cells(f'I{info["start_row"]}:I{info["end_row"]}')
+                    
+                    # 设置合并后单元格的值和居中对齐
+                    cdap_base_sheet[f'H{info["start_row"]}'].value = info['cdap_actual_cost']
+                    cdap_base_sheet[f'I{info["start_row"]}'].value = info['original_cost']
+                    
+                    # 设置居中对齐
+                    alignment = Alignment(horizontal='center', vertical='center')
+                    cdap_base_sheet[f'H{info["start_row"]}'].alignment = alignment
+                    cdap_base_sheet[f'I{info["start_row"]}'].alignment = alignment
 
         # 2. ADS后台数据详情
         ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
         ads_headers = [
-            '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', '历史活跃偏移天数', '阈值', 
-            '花费USD', '原始花费', 'Day_Recharge', 'Day_Recharge_USD', '币种', '汇率', '额外系数'
+            '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
+             '花费USD', '原始花费', '日充值美元', '日充值原始币种', '币种', '汇率', '额外系数', '历史活跃偏移天数', '阈值'
         ]
         ads_backend_sheet.append(ads_headers)
 
+        # 添加数据（ADS后台数据不需要单元格合并）
         for result in validation_results:
             for row in result['ads_backend_data']:
                 ads_backend_sheet.append(list(row))
