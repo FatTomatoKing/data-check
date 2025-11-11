@@ -947,8 +947,40 @@ class CdapAdsValidation:
             for row in result['ads_backend_data']:
                 ads_backend_sheet.append(list(row))
 
+        # 自适应列宽
+        self.auto_adjust_column_width(cdap_base_sheet)
+        self.auto_adjust_column_width(ads_backend_sheet)
+
         wb.save(output_filename)
         logger.info(f"验证结果已导出到: {output_filename}")
+
+    def auto_adjust_column_width(self, worksheet):
+        """自适应调整列宽"""
+        try:
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                
+                for cell in column:
+                    try:
+                        if cell.value:
+                            # 计算单元格内容长度，中文字符按2个字符计算
+                            cell_length = 0
+                            for char in str(cell.value):
+                                if ord(char) > 127:  # 中文字符
+                                    cell_length += 2
+                                else:  # 英文字符
+                                    cell_length += 1
+                            max_length = max(max_length, cell_length)
+                    except:
+                        pass
+                
+                # 设置列宽，最小宽度10，最大宽度50
+                adjusted_width = min(max(max_length + 2, 10), 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+                
+        except Exception as e:
+            logger.warning(f"自适应列宽设置失败: {e}")
 
     def run_validation(self):
         """执行完整的验证流程"""
