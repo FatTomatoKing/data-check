@@ -911,7 +911,8 @@ class CdapAdsValidation:
         ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
         ads_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数（ads后台实际逻辑）',
-             '花费美元（ads后台实际逻辑）', '花费原始币种（ads后台实际逻辑）', '日充值美元（ads后台实际逻辑）', '日充值原始币种（ads后台实际逻辑）'
+             '花费美元（ads后台实际逻辑统计时未带channel）', '花费原始币种（ads后台实际逻辑统计时未带channel）',
+            '花费美元（统计时带channel）', '花费原始币种（统计时带channel）','日充值美元（ads后台实际逻辑）', '日充值原始币种（ads后台实际逻辑）'
         ]
         ads_backend_sheet.append(ads_headers)
 
