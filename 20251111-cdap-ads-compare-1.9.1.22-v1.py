@@ -859,7 +859,8 @@ class CdapAdsValidation:
         cdap_base_sheet = wb.create_sheet('CDAP-Roas报表查询结果明细')
         base_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
-            'CDAP实际使用', '原始花费（CDAP实际使用）', '花费USD', '原始花费', '日充值美元', '日充值原始币种'
+            '花费美元（CDAP后台实际逻辑)', '原始花费（CDAP后台实际逻辑）', '花费美元（辅助检查使用）',
+            '花费原始币种（辅助检查使用）', '日充值美元（CDAP后台实际逻辑）', '日充值原始币种（CDAP后台实际逻辑）'
         ]
         cdap_base_sheet.append(base_headers)
 
@@ -909,8 +910,8 @@ class CdapAdsValidation:
         # 2. ADS后台数据详情
         ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
         ads_headers = [
-            '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
-             '花费USD', '原始花费', '日充值美元', '日充值原始币种'
+            '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数（ads后台实际逻辑）',
+             '花费美元（ads后台实际逻辑）', '花费原始币种（ads后台实际逻辑）', '日充值美元（ads后台实际逻辑）', '日充值原始币种（ads后台实际逻辑）'
         ]
         ads_backend_sheet.append(ads_headers)
 
