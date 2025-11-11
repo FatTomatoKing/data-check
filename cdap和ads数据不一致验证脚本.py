@@ -100,50 +100,97 @@ class CdapAdsValidation:
         try:
             session = self.cds_pg_session()
             results = session.execute(sql, {"channel": channel, "dates": dates}).fetchall()
-            return results
+            processed_results = self.process_cdap_data_with_cost(results)
+            return processed_results
         except Exception as e:
             logger.error(f"查询CDAP基础详细数据失败: {e}")
             return []
         finally:
             session.close()
 
-    def query_cdap_campaign_detail_data(self, channel, dates):
-        """查询2：CDAP Campaign详细数据"""
-        sql = text("""
-            SELECT 
-              'history_active_cohort_cost_calculate_trend_campaign' as table_name,
-              hact.dates,
-              hact.bdates,
-              hact.channel,
-              hact.source,
-              hact.campaign_id,
-              hact.active,
-              hact.history_active_offset_days,
-              COALESCE(hacfd.channel_threshold_value, 
-                (SELECT channel_threshold_value FROM history_active_channel_config 
-                 WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value
-            FROM history_active_cohort_cost_calculate_trend_campaign hact
-            LEFT JOIN history_active_channel_config_detail hacfd ON hact.channel = hacfd.channel 
-            WHERE hact.channel = :channel
-              AND hact.dates = :dates
-              AND hact.dates = hact.bdates
-              AND hact.history_active_offset_days > COALESCE(
-                hacfd.channel_threshold_value, 
-                (SELECT channel_threshold_value FROM history_active_channel_config 
-                 WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')
-              )
-            ORDER BY hact.dates, hact.channel, hact.source, hact.campaign_id, hact.active DESC
-        """)
 
-        try:
-            session = self.cds_pg_session()
-            results = session.execute(sql, {"channel": channel, "dates": dates}).fetchall()
+    def process_cdap_data_with_cost(self, results):
+        """处理CDAP数据：按dates+channel+campaign_id分组计算花费"""
+        if not results:
             return results
-        except Exception as e:
-            logger.error(f"查询CDAP Campaign详细数据失败: {e}")
-            return []
-        finally:
-            session.close()
+        
+        logger.info("开始处理CDAP数据花费计算（按dates+channel+campaign_id分组）")
+        
+        # 按 dates + channel + campaign_id 进行分组，用于确定花费分配逻辑
+        group_map = {}
+        for row in results:
+            # row格式: table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value
+            dates = row[1]
+            channel = row[3] 
+            campaign_id = row[5]
+            key = f"{dates}_{channel}_{campaign_id}"
+            
+            if key not in group_map:
+                group_map[key] = []
+            group_map[key].append(row)
+        
+        logger.info(f"花费分配分组：共{len(group_map)}个分组")
+        
+        # 为每个分组计算花费（每个分组只计算一次）
+        group_costs = {}
+        for key, group_rows in group_map.items():
+            base_row = group_rows[0]  # 使用第一行获取基本信息
+            campaign_id = base_row[5]
+            dates = base_row[1]
+            channel = base_row[3]
+            
+            # 计算这个分组的花费 - 添加channel条件
+            cost_info = self.calculate_campaign_cost_with_channel_details(dates, campaign_id, channel)
+            group_costs[key] = cost_info
+            logger.info(f"分组 {key} 花费计算: {cost_info['cost_usd']} USD")
+        
+        # 处理每条明细记录（保持原始记录数量）
+        processed_results = []
+        for row in results:
+            dates = row[1]
+            channel = row[3] 
+            campaign_id = row[5]
+            key = f"{dates}_{channel}_{campaign_id}"
+            
+            # 判断是否是该分组的第一条记录（用于花费分配）
+            group_rows = group_map[key]
+            is_first_record = (row == group_rows[0])
+            
+            # 处理花费信息：只有每个分组的第一条记录显示花费
+            if is_first_record:
+                # 分组第一条记录：显示实际花费
+                cost_info = group_costs[key]
+                logger.info(f"分组 {key} 第一条明细记录，分配花费: {cost_info['cost_usd']} USD")
+            else:
+                # 分组后续记录：花费设置为0，但保持币种信息
+                original_cost_info = group_costs[key]
+                cost_info = {
+                    'cost_usd': 0.0,
+                    'original_cost': 0.0,
+                    'currency': original_cost_info['currency'],
+                    'rate': original_cost_info['rate'],
+                    'extra_rate': original_cost_info['extra_rate']
+                }
+                logger.info(f"分组 {key} 后续明细记录，花费设置为0")
+            
+            # 重新构建行数据，添加花费信息
+            # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value, 花费USD, 原始花费, 花费币种, 花费汇率, 花费额外系数
+            
+            reordered_row = []
+            reordered_row.extend(row[:9])  # table_name 到 threshold_value
+            reordered_row.append(cost_info['cost_usd'])  # 花费USD
+            reordered_row.append(cost_info['original_cost'])  # 原始花费
+            reordered_row.append(cost_info['currency'])  # 花费币种
+            reordered_row.append(cost_info['rate'])  # 花费汇率
+            reordered_row.append(cost_info['extra_rate'])  # 花费额外系数
+            
+            processed_results.append(tuple(reordered_row))
+        
+        logger.info(f"明细数据处理完成：共{len(processed_results)}条明细记录，基于{len(group_map)}个分组的花费分配逻辑")
+        return processed_results
+
+
 
     def query_ads_backend_detail_data(self, channel, dates):
         """查询3：ADS广告后台详细数据"""
@@ -253,10 +300,11 @@ class CdapAdsValidation:
             base_row = group_rows[0]  # 使用第一行获取基本信息
             campaign_id = base_row[5]
             dates = base_row[1]
-            pn = base_row[9] if base_row[9] is not None else "IN"  # 获取pn字段
+            pn = base_row[9]  # 获取pn字段
             
-            # 计算这个分组的花费
-            cost_info = self.calculate_campaign_cost_with_details(dates, campaign_id, pn)
+            # 计算这个分组的花费 - 使用带channel条件的方法
+            channel = base_row[3]  # 获取channel信息
+            cost_info = self.calculate_campaign_cost_with_channel_details(dates, campaign_id, channel, pn)
             group_costs[key] = cost_info
             logger.info(f"分组 {key} 花费计算: {cost_info['cost_usd']} USD")
         
@@ -291,7 +339,7 @@ class CdapAdsValidation:
             
             # 处理day_recharge汇率转换 - 每条明细记录都有自己的充值金额
             day_recharge_raw = row[8] if row[8] is not None else 0.0
-            pn = row[9] if row[9] is not None else "IN"  # 直接使用查询出来的pn字段
+            pn = row[9]  # 直接使用查询出来的pn字段
             
             try:
                 day_recharge = float(day_recharge_raw)
@@ -371,11 +419,81 @@ class CdapAdsValidation:
             logger.error(f"计算Campaign {campaign_id} 花费失败: {e}")
             return result
 
+    def calculate_campaign_cost_with_channel_details(self, dates, campaign_id, channel, pn=None):
+        """计算Campaign的花费并返回详细信息（带channel条件）"""
+        result = {
+            'cost_usd': 0.0,
+            'original_cost': 0.0,
+            'currency': 'USD',
+            'rate': 1.0,
+            'extra_rate': 1.0
+        }
+        
+        try:
+            # 1. 查询原始花费（带channel条件）
+            cost_amount = self.query_campaign_cost_by_channel(dates, campaign_id, channel)
+            result['original_cost'] = cost_amount
+            
+            if cost_amount is None or cost_amount == 0:
+                logger.info(f"Campaign {campaign_id} Channel {channel} 花费为0或查询失败")
+                return result
+            
+            # 2. 获取pn参数
+            if not pn:
+                logger.warning(f"Campaign {campaign_id} Channel {channel} 缺少pn参数")
+                return result
+            
+            # 3. 汇率转换为USD并获取详细信息
+            conversion_result = self.currency_to_usd_with_details(dates, cost_amount, pn)
+            
+            result.update(conversion_result)
+            
+            logger.info(f"花费计算详情 - Campaign: {campaign_id}, Channel: {channel}, PN: {pn}")
+            logger.info(f"  原始金额: {result['original_cost']} {result['currency']}")
+            logger.info(f"  汇率: {result['rate']}")
+            logger.info(f"  额外系数: {result['extra_rate']}")
+            logger.info(f"  USD金额: {result['cost_usd']}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"计算Campaign {campaign_id} Channel {channel} 花费失败: {e}")
+            return result
+
     def calculate_campaign_cost_usd(self, dates, campaign_id, pn=None):
         """计算Campaign的花费（USD）- 保持向后兼容"""
         result = self.calculate_campaign_cost_with_details(dates, campaign_id, pn)
         return result['cost_usd']
     
+    def query_campaign_cost_by_channel(self, dates, campaign_id, channel):
+        """查询Campaign花费（带channel条件）- 参考Java代码的queryCostByDatas方法"""
+        if not campaign_id or campaign_id.strip() == '':
+            return 0.0
+            
+        # 参考Java代码：按dates分组，添加channel条件
+        sql = text("""
+            SELECT SUM(cost) as cost 
+            FROM adjust_cost_record 
+            WHERE dates = :dates 
+              AND campaign_id = :campaign_id 
+              AND channel = :channel
+        """)
+        
+        try:
+            session = self.cds_pg_session()  # 使用PG连接
+            result = session.execute(sql, {
+                "dates": dates, 
+                "campaign_id": campaign_id,
+                "channel": channel
+            }).fetchone()
+            cost = result[0] if result and result[0] is not None else 0.0
+            return float(cost)
+        except Exception as e:
+            logger.error(f"查询Campaign {campaign_id} Channel {channel} 花费失败: {e}")
+            return 0.0
+        finally:
+            session.close()
+
     def query_campaign_cost(self, dates, campaign_id):
         """查询Campaign花费 - 对应 adjustCostRecordService.sumCost"""
         if not campaign_id or campaign_id.strip() == '':
@@ -554,9 +672,8 @@ class CdapAdsValidation:
         """验证单个渠道的数据"""
         logger.info(f"开始验证渠道: {channel}, 日期: {dates}")
 
-        # 执行所有查询
+        # 执行查询（删除cdap_campaign_data）
         cdap_base_data = self.query_cdap_base_detail_data(channel, dates)
-        cdap_campaign_data = self.query_cdap_campaign_detail_data(channel, dates)
         ads_backend_data = self.query_ads_backend_detail_data(channel, dates)
 
         # 数据差异比较功能已去掉
@@ -566,7 +683,6 @@ class CdapAdsValidation:
             'channel': channel,
             'dates': dates,
             'cdap_base_data': cdap_base_data,
-            'cdap_campaign_data': cdap_campaign_data,
             'ads_backend_data': ads_backend_data,
             'differences': differences
         }
@@ -576,11 +692,11 @@ class CdapAdsValidation:
         wb = openpyxl.Workbook()
         wb.remove(wb.active)  # 删除默认sheet
 
-
-        # 2. CDAP基础数据详情
+        # 1. CDAP基础数据详情（带花费信息）
         cdap_base_sheet = wb.create_sheet('CDAP-Roas报表查询结果明细')
         base_headers = [
-            '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', '历史活跃偏移天数', '阈值'
+            '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', 
+            '历史活跃偏移天数', '阈值', '花费USD', '原始花费', '花费币种', '花费汇率', '花费额外系数'
         ]
         cdap_base_sheet.append(base_headers)
 
@@ -588,18 +704,7 @@ class CdapAdsValidation:
             for row in result['cdap_base_data']:
                 cdap_base_sheet.append(list(row))
 
-        # 3. CDAP Campaign数据详情
-        cdap_campaign_sheet = wb.create_sheet('CDAP-Roas条件模拟明细')
-        campaign_headers = [
-            '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', '历史活跃偏移天数', '阈值'
-        ]
-        cdap_campaign_sheet.append(campaign_headers)
-
-        for result in validation_results:
-            for row in result['cdap_campaign_data']:
-                cdap_campaign_sheet.append(list(row))
-
-        # 4. ADS后台数据详情
+        # 2. ADS后台数据详情
         ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
         ads_headers = [
             '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', '历史活跃偏移天数', '阈值', 
@@ -610,8 +715,6 @@ class CdapAdsValidation:
         for result in validation_results:
             for row in result['ads_backend_data']:
                 ads_backend_sheet.append(list(row))
-
-
 
         wb.save(output_filename)
         logger.info(f"验证结果已导出到: {output_filename}")
@@ -662,12 +765,12 @@ class CdapAdsValidation:
 
             logger.info(f"渠道: {channel}, 日期: {dates}")
             logger.info(f"  CDAP基础数据记录数: {len(result['cdap_base_data'])}")
-            logger.info(f"  CDAP Campaign数据记录数: {len(result['cdap_campaign_data'])}")
             logger.info(f"  ADS后台数据记录数: {len(result['ads_backend_data'])}")
             logger.info("-" * 40)
 
-
         logger.info("验证完成！详细结果请查看Excel文件。")
+
+
 
 
 if __name__ == '__main__':
