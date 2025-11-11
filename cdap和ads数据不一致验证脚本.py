@@ -84,12 +84,13 @@ class CdapAdsValidation:
               hact.day_recharge,
               COALESCE(hacfd.channel_threshold_value, 
                 (SELECT channel_threshold_value FROM history_active_channel_config 
-                 WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value
+                 WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value   
             FROM history_active_cohort_cost_calculate_trend hact
             LEFT JOIN history_active_channel_config_detail hacfd ON hact.channel = hacfd.channel 
             WHERE hact.channel = :channel
               AND hact.dates = :dates
-              AND hact.dates = hact.bdates
+              AND hact.dates <= hact.bdates
+              AND hact.cohort = 0
               AND hact.history_active_offset_days > COALESCE(
                 hacfd.channel_threshold_value, 
                 (SELECT channel_threshold_value FROM history_active_channel_config 
