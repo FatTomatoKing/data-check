@@ -225,63 +225,70 @@ class CdapAdsValidation:
             session.close()
 
     def process_ads_data_with_cost(self, results):
-        """处理ADS数据：保持原始记录数量，同一campaign_id只有第一条记录有花费"""
+        """处理ADS数据：保持明细数据，但花费分配参考Java后端分组逻辑"""
         if not results:
             return results
         
-        logger.info("开始处理ADS数据花费计算（同一campaign_id只有第一条记录有花费）")
+        logger.info("开始处理ADS数据花费计算（保持明细数据，花费分配参考Java后端逻辑）")
         
-        # 先计算所有唯一campaign_id的花费和day_recharge转换
-        campaign_costs = {}
+        # 按 dates + channel + campaignId 进行分组，用于确定花费分配逻辑
+        group_map = {}
         for row in results:
-            campaign_id = row[5]
+            # row格式: table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, threshold_value
             dates = row[1]
-            
-            if campaign_id not in campaign_costs:
-                cost_info = self.calculate_campaign_cost_with_details(dates, campaign_id)
-                campaign_costs[campaign_id] = cost_info
-                logger.info(f"计算Campaign {campaign_id} 花费: {cost_info['cost_usd']} USD")
-        
-        # 统计每个campaign_id出现的次数，用于判断是否需要分摊花费
-        campaign_counts = {}
-        for row in results:
+            channel = row[3] 
             campaign_id = row[5]
-            campaign_counts[campaign_id] = campaign_counts.get(campaign_id, 0) + 1
+            key = f"{dates}_{channel}_{campaign_id}"
+            
+            if key not in group_map:
+                group_map[key] = []
+            group_map[key].append(row)
         
-        # 记录每个campaign_id已经处理的次数
-        campaign_processed_count = {}
+        logger.info(f"花费分配分组：共{len(group_map)}个分组")
         
-        # 为每条记录添加对应的花费信息
+        # 为每个分组计算花费（每个分组只计算一次）
+        group_costs = {}
+        for key, group_rows in group_map.items():
+            base_row = group_rows[0]  # 使用第一行获取基本信息
+            campaign_id = base_row[5]
+            dates = base_row[1]
+            
+            # 计算这个分组的花费
+            cost_info = self.calculate_campaign_cost_with_details(dates, campaign_id)
+            group_costs[key] = cost_info
+            logger.info(f"分组 {key} 花费计算: {cost_info['cost_usd']} USD")
+        
+        # 处理每条明细记录（保持原始记录数量）
         processed_results = []
         for row in results:
+            dates = row[1]
+            channel = row[3] 
             campaign_id = row[5]
+            key = f"{dates}_{channel}_{campaign_id}"
             
-            # 创建新行，添加花费和day_recharge转换字段
-            new_row = list(row)
+            # 判断是否是该分组的第一条记录（用于花费分配）
+            group_rows = group_map[key]
+            is_first_record = (row == group_rows[0])
             
-            # 获取当前campaign_id已处理次数
-            current_count = campaign_processed_count.get(campaign_id, 0)
-            campaign_processed_count[campaign_id] = current_count + 1
-            
-            # 处理花费信息
-            if current_count == 0:
-                # 这个campaign_id的第一条记录，分配花费
-                cost_info = campaign_costs[campaign_id]
-                logger.info(f"Campaign {campaign_id} 花费分配给第一条记录: {cost_info['cost_usd']} USD")
+            # 处理花费信息：只有每个分组的第一条记录显示花费
+            if is_first_record:
+                # 分组第一条记录：显示实际花费
+                cost_info = group_costs[key]
+                logger.info(f"分组 {key} 第一条明细记录，分配花费: {cost_info['cost_usd']} USD")
             else:
-                # 这个campaign_id的后续记录，设置为0，但保持原来的币种信息
-                original_cost_info = campaign_costs[campaign_id]
+                # 分组后续记录：花费设置为0，但保持币种信息
+                original_cost_info = group_costs[key]
                 cost_info = {
                     'cost_usd': 0.0,
                     'original_cost': 0.0,
-                    'currency': original_cost_info['currency'],  # 保持原来的币种
-                    'rate': original_cost_info['rate'],          # 保持原来的汇率
-                    'extra_rate': original_cost_info['extra_rate'] # 保持原来的额外系数
+                    'currency': original_cost_info['currency'],
+                    'rate': original_cost_info['rate'],
+                    'extra_rate': original_cost_info['extra_rate']
                 }
-                logger.info(f"Campaign {campaign_id} 第{current_count + 1}条记录，花费设置为0，币种保持为{original_cost_info['currency']}")
+                logger.info(f"分组 {key} 后续明细记录，花费设置为0")
             
-            # 处理day_recharge汇率转换 - 每条记录都有自己的充值金额
-            day_recharge_raw = row[8] if row[8] is not None else 0.0  # day_recharge字段在索引8
+            # 处理day_recharge汇率转换 - 每条明细记录都有自己的充值金额
+            day_recharge_raw = row[8] if row[8] is not None else 0.0
             pn = self.get_pn_by_campaign_id(campaign_id)
             
             try:
@@ -290,10 +297,10 @@ class CdapAdsValidation:
                 logger.warning(f"day_recharge类型转换失败: {day_recharge_raw}, 设置为0")
                 day_recharge = 0.0
             
-            # 每条记录都进行day_recharge转换，不管是否是第一条记录
+            # 每条明细记录都进行day_recharge转换
             if day_recharge > 0 and pn:
                 recharge_conversion = self.currency_to_usd_with_details(dates, day_recharge, pn)
-                logger.info(f"Campaign {campaign_id} 记录day_recharge转换: {day_recharge} {recharge_conversion['currency']} -> {recharge_conversion['cost_usd']} USD")
+                logger.info(f"明细记录 Campaign {campaign_id} day_recharge转换: {day_recharge} -> {recharge_conversion['cost_usd']} USD")
             else:
                 recharge_conversion = {
                     'cost_usd': 0.0,
@@ -302,11 +309,10 @@ class CdapAdsValidation:
                     'extra_rate': 1.0
                 }
             
-            # 重新构建行数据，调整字段顺序
+            # 重新构建行数据，调整字段顺序（保持明细数据结构）
             # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, threshold_value
             # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value, 花费USD, 原始花费, Day_Recharge, Day_Recharge_USD, 花费币种, 花费汇率, 花费额外系数
             
-            # 重新构建new_row，调整day_recharge和threshold_value的位置
             reordered_row = []
             reordered_row.extend(row[:8])  # table_name 到 history_active_offset_days
             reordered_row.append(row[9])   # threshold_value
@@ -320,7 +326,7 @@ class CdapAdsValidation:
             
             processed_results.append(tuple(reordered_row))
         
-        logger.info(f"处理完成：共{len(processed_results)}条记录，涉及{len(campaign_costs)}个不同的campaign_id")
+        logger.info(f"明细数据处理完成：共{len(processed_results)}条明细记录，基于{len(group_map)}个分组的花费分配逻辑")
         return processed_results
     
     def calculate_campaign_cost_with_details(self, dates, campaign_id):
