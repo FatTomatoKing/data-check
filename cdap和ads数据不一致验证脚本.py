@@ -537,51 +537,6 @@ class CdapAdsValidation:
 
 
 
-    def query_cost_data_issues(self, dates):
-        """查询4：花费数据检查"""
-        sql = text("""
-            SELECT 
-              dates,
-              channel,
-              campaign_id,
-              cost,
-              CASE 
-                WHEN channel IS NULL THEN 'channel_is_null'
-                WHEN channel = '' THEN 'channel_is_empty'
-                ELSE 'channel_has_value'
-              END as channel_status,
-              CASE 
-                WHEN channel IS NULL OR channel = '' THEN 'problematic_record'
-                ELSE 'normal_record'
-              END as data_quality
-            FROM adjust_cost_record 
-            WHERE dates = :dates
-              AND (
-                (channel IS NULL OR channel = '')
-                OR 
-                campaign_id IN (
-                  SELECT campaign_id
-                  FROM adjust_cost_record 
-                  WHERE dates = :dates
-                  GROUP BY campaign_id
-                  HAVING COUNT(DISTINCT COALESCE(channel, '')) > 1
-                )
-              )
-            ORDER BY 
-              campaign_id, 
-              CASE WHEN channel IS NULL THEN 1 WHEN channel = '' THEN 2 ELSE 3 END,
-              channel
-        """)
-
-        try:
-            session = self.cds_pg_session()
-            results = session.execute(sql, {"dates": dates}).fetchall()
-            return results
-        except Exception as e:
-            logger.error(f"查询花费数据问题失败: {e}")
-            return []
-        finally:
-            session.close()
 
 
     def validate_single_channel(self, channel, dates):
@@ -605,7 +560,7 @@ class CdapAdsValidation:
             'differences': differences
         }
 
-    def export_to_excel(self, validation_results, cost_issues, output_filename):
+    def export_to_excel(self, validation_results, output_filename):
         """导出结果到Excel"""
         wb = openpyxl.Workbook()
         wb.remove(wb.active)  # 删除默认sheet
@@ -646,14 +601,6 @@ class CdapAdsValidation:
                 ads_backend_sheet.append(list(row))
 
 
-        # 6. 花费数据问题
-        cost_sheet = wb.create_sheet('花费数据问题')
-        cost_headers = ['日期', '渠道', 'Campaign ID', '花费', '渠道状态', '数据质量']
-        cost_sheet.append(cost_headers)
-
-        for cost_issue in cost_issues:
-            cost_sheet.append(list(cost_issue))
-
 
         wb.save(output_filename)
         logger.info(f"验证结果已导出到: {output_filename}")
@@ -676,25 +623,23 @@ class CdapAdsValidation:
                 result = self.validate_single_channel(channel, dates)
                 validation_results.append(result)
 
-            # 查询花费数据问题
-            cost_issues = self.query_cost_data_issues(dates)
 
             # 导出结果
             timestamp = int(time.time())
             output_filename = f'D:/code-py/pythonProject/{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'
             # output_filename = f'{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'  # 本地测试用
 
-            self.export_to_excel(validation_results, cost_issues, output_filename)
+            self.export_to_excel(validation_results, output_filename)
 
             # 打印汇总信息
-            self.print_summary(validation_results, cost_issues)
+            self.print_summary(validation_results)
 
         except Exception as e:
             logger.error(f"验证过程出错: {e}")
             traceback.print_exc()
             raise
 
-    def print_summary(self, validation_results, cost_issues):
+    def print_summary(self, validation_results):
         """打印验证汇总信息"""
         logger.info("=" * 60)
         logger.info("验证结果汇总")
@@ -710,8 +655,6 @@ class CdapAdsValidation:
             logger.info(f"  ADS后台数据记录数: {len(result['ads_backend_data'])}")
             logger.info("-" * 40)
 
-        if cost_issues:
-            logger.info(f"发现花费数据问题记录数: {len(cost_issues)}")
 
         logger.info("验证完成！详细结果请查看Excel文件。")
 
