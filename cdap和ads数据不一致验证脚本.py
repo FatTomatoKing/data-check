@@ -158,6 +158,7 @@ class CdapAdsValidation:
               hact.campaign_id,
               hact.active,
               hact.history_active_offset_days,
+              hact.day_recharge,
               COALESCE(hacfd.channel_threshold_value, 
                 (SELECT channel_threshold_value FROM history_active_channel_config 
                  WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value
@@ -166,7 +167,7 @@ class CdapAdsValidation:
             WHERE hact.channel = :channel
               AND hact.campaign_id = a.campaign_id
               AND hact.dates = :dates
-              AND hact.dates = hact.bdates
+              AND hact.cohort = 0
               AND hact.history_active_offset_days > COALESCE(
                 hacfd.channel_threshold_value, 
                 (SELECT channel_threshold_value FROM history_active_channel_config 
@@ -224,13 +225,13 @@ class CdapAdsValidation:
             session.close()
 
     def process_ads_data_with_cost(self, results):
-        """处理ADS数据：保持原始记录数量，相同campaign_id共用花费值"""
+        """处理ADS数据：保持原始记录数量，同一campaign_id只有第一条记录有花费"""
         if not results:
             return results
         
-        logger.info("开始处理ADS数据花费计算（保持原始记录数量，相同campaign_id共用花费）")
+        logger.info("开始处理ADS数据花费计算（同一campaign_id只有第一条记录有花费）")
         
-        # 先计算所有唯一campaign_id的花费
+        # 先计算所有唯一campaign_id的花费和day_recharge转换
         campaign_costs = {}
         for row in results:
             campaign_id = row[5]
@@ -241,23 +242,83 @@ class CdapAdsValidation:
                 campaign_costs[campaign_id] = cost_info
                 logger.info(f"计算Campaign {campaign_id} 花费: {cost_info['cost_usd']} USD")
         
+        # 统计每个campaign_id出现的次数，用于判断是否需要分摊花费
+        campaign_counts = {}
+        for row in results:
+            campaign_id = row[5]
+            campaign_counts[campaign_id] = campaign_counts.get(campaign_id, 0) + 1
+        
+        # 记录每个campaign_id已经处理的次数
+        campaign_processed_count = {}
+        
         # 为每条记录添加对应的花费信息
         processed_results = []
         for row in results:
             campaign_id = row[5]
             
-            # 创建新行，添加花费字段
+            # 创建新行，添加花费和day_recharge转换字段
             new_row = list(row)
-            cost_info = campaign_costs[campaign_id]
             
-            # 添加花费相关字段到结果中
-            new_row.append(cost_info['cost_usd'])  # 花费USD
-            new_row.append(cost_info['original_cost'])  # 原始花费
-            new_row.append(cost_info['currency'])  # 原始币种
-            new_row.append(cost_info['rate'])  # 汇率
-            new_row.append(cost_info['extra_rate'])  # 额外系数
+            # 获取当前campaign_id已处理次数
+            current_count = campaign_processed_count.get(campaign_id, 0)
+            campaign_processed_count[campaign_id] = current_count + 1
             
-            processed_results.append(tuple(new_row))
+            # 处理花费信息
+            if current_count == 0:
+                # 这个campaign_id的第一条记录，分配花费
+                cost_info = campaign_costs[campaign_id]
+                logger.info(f"Campaign {campaign_id} 花费分配给第一条记录: {cost_info['cost_usd']} USD")
+            else:
+                # 这个campaign_id的后续记录，设置为0，但保持原来的币种信息
+                original_cost_info = campaign_costs[campaign_id]
+                cost_info = {
+                    'cost_usd': 0.0,
+                    'original_cost': 0.0,
+                    'currency': original_cost_info['currency'],  # 保持原来的币种
+                    'rate': original_cost_info['rate'],          # 保持原来的汇率
+                    'extra_rate': original_cost_info['extra_rate'] # 保持原来的额外系数
+                }
+                logger.info(f"Campaign {campaign_id} 第{current_count + 1}条记录，花费设置为0，币种保持为{original_cost_info['currency']}")
+            
+            # 处理day_recharge汇率转换 - 每条记录都有自己的充值金额
+            day_recharge_raw = row[8] if row[8] is not None else 0.0  # day_recharge字段在索引8
+            pn = self.get_pn_by_campaign_id(campaign_id)
+            
+            try:
+                day_recharge = float(day_recharge_raw)
+            except (ValueError, TypeError):
+                logger.warning(f"day_recharge类型转换失败: {day_recharge_raw}, 设置为0")
+                day_recharge = 0.0
+            
+            # 每条记录都进行day_recharge转换，不管是否是第一条记录
+            if day_recharge > 0 and pn:
+                recharge_conversion = self.currency_to_usd_with_details(dates, day_recharge, pn)
+                logger.info(f"Campaign {campaign_id} 记录day_recharge转换: {day_recharge} {recharge_conversion['currency']} -> {recharge_conversion['cost_usd']} USD")
+            else:
+                recharge_conversion = {
+                    'cost_usd': 0.0,
+                    'currency': 'USD',
+                    'rate': 1.0,
+                    'extra_rate': 1.0
+                }
+            
+            # 重新构建行数据，调整字段顺序
+            # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, threshold_value
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value, 花费USD, 原始花费, Day_Recharge, Day_Recharge_USD, 花费币种, 花费汇率, 花费额外系数
+            
+            # 重新构建new_row，调整day_recharge和threshold_value的位置
+            reordered_row = []
+            reordered_row.extend(row[:8])  # table_name 到 history_active_offset_days
+            reordered_row.append(row[9])   # threshold_value
+            reordered_row.append(cost_info['cost_usd'])  # 花费USD
+            reordered_row.append(cost_info['original_cost'])  # 原始花费
+            reordered_row.append(day_recharge)  # Day_Recharge (原始值)
+            reordered_row.append(recharge_conversion['cost_usd'])  # Day_Recharge_USD
+            reordered_row.append(cost_info['currency'])  # 花费币种
+            reordered_row.append(cost_info['rate'])  # 花费汇率
+            reordered_row.append(cost_info['extra_rate'])  # 花费额外系数
+            
+            processed_results.append(tuple(reordered_row))
         
         logger.info(f"处理完成：共{len(processed_results)}条记录，涉及{len(campaign_costs)}个不同的campaign_id")
         return processed_results
@@ -409,14 +470,21 @@ class CdapAdsValidation:
             extra_rate = project_entity.get('extra_rate', 1.0)
         result['extra_rate'] = extra_rate
         
-        # 2. 金额 * 额外系数
-        extra_money = source_money * extra_rate
+        # 2. 金额 * 额外系数 - 确保类型转换
+        try:
+            source_money_float = float(source_money)
+            extra_rate_float = float(extra_rate)
+            extra_money = source_money_float * extra_rate_float
+        except (ValueError, TypeError) as e:
+            logger.error(f"类型转换失败: source_money={source_money}, extra_rate={extra_rate}, error={e}")
+            result['cost_usd'] = 0.0
+            return result
         
         # 3. 获取项目货币配置
         currency = self.get_currency_by_pn(pn)
         if not currency:
             logger.warning(f"无法获取pn {pn} 对应的货币")
-            result['cost_usd'] = source_money
+            result['cost_usd'] = float(source_money)
             return result
         result['currency'] = currency
         
@@ -429,16 +497,21 @@ class CdapAdsValidation:
                 logger.warning(f"query rate entity null, use default[{rate}], base: USD, symbols: {currency}")
             else:
                 logger.warning(f"query rate entity null, base: USD, symbols: {currency}")
-                result['cost_usd'] = source_money
+                result['cost_usd'] = float(source_money)
                 return result
         result['rate'] = rate
         
         # 5. 计算USD金额
         if rate and rate != 0:
-            usd_value = extra_money / rate
-            result['cost_usd'] = round(usd_value, 2)
+            try:
+                rate_float = float(rate)
+                usd_value = extra_money / rate_float
+                result['cost_usd'] = round(usd_value, 2)
+            except (ValueError, TypeError, ZeroDivisionError) as e:
+                logger.error(f"汇率计算失败: extra_money={extra_money}, rate={rate}, error={e}")
+                result['cost_usd'] = float(source_money)
         else:
-            result['cost_usd'] = source_money
+            result['cost_usd'] = float(source_money)
         
         return result
 
@@ -454,6 +527,7 @@ class CdapAdsValidation:
         if pn == "IN":
             return "INR"
         return "USD"  # 默认USD
+
 
 
 
@@ -557,13 +631,14 @@ class CdapAdsValidation:
         ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
         ads_headers = [
             '表名', '日期', 'BDates', '渠道', 'Source', 'Campaign ID', '活跃用户数', '历史活跃偏移天数', '阈值', 
-            '花费USD', '原始花费', '原始币种', '汇率', '额外系数'
+            '花费USD', '原始花费', 'Day_Recharge', 'Day_Recharge_USD', '花费币种', '花费汇率', '花费额外系数'
         ]
         ads_backend_sheet.append(ads_headers)
 
         for result in validation_results:
             for row in result['ads_backend_data']:
                 ads_backend_sheet.append(list(row))
+
 
         # 6. 花费数据问题
         cost_sheet = wb.create_sheet('花费数据问题')
