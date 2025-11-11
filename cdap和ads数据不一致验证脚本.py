@@ -159,6 +159,7 @@ class CdapAdsValidation:
               hact.active,
               hact.history_active_offset_days,
               hact.day_recharge,
+              hact.pn,
               COALESCE(hacfd.channel_threshold_value, 
                 (SELECT channel_threshold_value FROM history_active_channel_config 
                  WHERE channel_prefix = 'DEFAULT_CHANNEL_PREFIX')) as threshold_value
@@ -252,9 +253,10 @@ class CdapAdsValidation:
             base_row = group_rows[0]  # 使用第一行获取基本信息
             campaign_id = base_row[5]
             dates = base_row[1]
+            pn = base_row[9] if base_row[9] is not None else "IN"  # 获取pn字段
             
             # 计算这个分组的花费
-            cost_info = self.calculate_campaign_cost_with_details(dates, campaign_id)
+            cost_info = self.calculate_campaign_cost_with_details(dates, campaign_id, pn)
             group_costs[key] = cost_info
             logger.info(f"分组 {key} 花费计算: {cost_info['cost_usd']} USD")
         
@@ -289,7 +291,7 @@ class CdapAdsValidation:
             
             # 处理day_recharge汇率转换 - 每条明细记录都有自己的充值金额
             day_recharge_raw = row[8] if row[8] is not None else 0.0
-            pn = self.get_pn_by_campaign_id(campaign_id)
+            pn = row[9] if row[9] is not None else "IN"  # 直接使用查询出来的pn字段
             
             try:
                 day_recharge = float(day_recharge_raw)
@@ -309,13 +311,13 @@ class CdapAdsValidation:
                     'extra_rate': 1.0
                 }
             
-            # 重新构建行数据，调整字段顺序（保持明细数据结构）
-            # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, threshold_value
+            # 重新构建行数据，调整字段顺序（保持明细数据结构，但不输出pn字段）
+            # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, pn, threshold_value
             # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, threshold_value, 花费USD, 原始花费, Day_Recharge, Day_Recharge_USD, 花费币种, 花费汇率, 花费额外系数
             
             reordered_row = []
             reordered_row.extend(row[:8])  # table_name 到 history_active_offset_days
-            reordered_row.append(row[9])   # threshold_value
+            reordered_row.append(row[10])  # threshold_value (跳过pn字段)
             reordered_row.append(cost_info['cost_usd'])  # 花费USD
             reordered_row.append(cost_info['original_cost'])  # 原始花费
             reordered_row.append(day_recharge)  # Day_Recharge (原始值)
@@ -329,7 +331,7 @@ class CdapAdsValidation:
         logger.info(f"明细数据处理完成：共{len(processed_results)}条明细记录，基于{len(group_map)}个分组的花费分配逻辑")
         return processed_results
     
-    def calculate_campaign_cost_with_details(self, dates, campaign_id):
+    def calculate_campaign_cost_with_details(self, dates, campaign_id, pn=None):
         """计算Campaign的花费并返回详细信息"""
         result = {
             'cost_usd': 0.0,
@@ -348,12 +350,9 @@ class CdapAdsValidation:
                 logger.info(f"Campaign {campaign_id} 花费为0或查询失败")
                 return result
             
-            # 2. 查询项目配置获取pn
-            pn = self.get_pn_by_campaign_id(campaign_id)
+            # 2. 使用传入的pn参数，如果没有则使用默认值
             if not pn:
-                logger.warning(f"无法获取campaign_id {campaign_id} 对应的pn")
-                result['cost_usd'] = cost_amount  # 如果无法获取pn，返回原始金额
-                return result
+                logger.error(f"未提供pn参数")
             
             # 3. 汇率转换为USD并获取详细信息
             conversion_result = self.currency_to_usd_with_details(dates, cost_amount, pn)
@@ -372,9 +371,9 @@ class CdapAdsValidation:
             logger.error(f"计算Campaign {campaign_id} 花费失败: {e}")
             return result
 
-    def calculate_campaign_cost_usd(self, dates, campaign_id):
+    def calculate_campaign_cost_usd(self, dates, campaign_id, pn=None):
         """计算Campaign的花费（USD）- 保持向后兼容"""
-        result = self.calculate_campaign_cost_with_details(dates, campaign_id)
+        result = self.calculate_campaign_cost_with_details(dates, campaign_id, pn)
         return result['cost_usd']
     
     def query_campaign_cost(self, dates, campaign_id):
@@ -395,12 +394,6 @@ class CdapAdsValidation:
         finally:
             session.close()
     
-    def get_pn_by_campaign_id(self, campaign_id):
-        """根据campaign_id获取pn - 简化实现"""
-        # 这里需要根据实际业务逻辑实现
-        # 可能需要从campaign表或其他表获取pn信息
-        # 暂时返回默认值，实际项目中需要完善
-        return "IN"  # 默认返回IN，实际需要查询数据库
     
     def query_project_entity(self, pn):
         """查询项目配置 - 对应 projectService.queryEntityByPn"""
@@ -527,12 +520,30 @@ class CdapAdsValidation:
         return result['cost_usd']
     
     def get_currency_by_pn(self, pn):
-        """根据pn获取货币类型 - 简化实现"""
-        # 实际需要查询project_currency_config表
-        # 这里简化处理
-        if pn == "IN":
-            return "INR"
-        return "USD"  # 默认USD
+        """根据pn获取货币类型 - 查询project_currency_config表"""
+        sql = text("""
+            SELECT pn, currency, created 
+            FROM project_currency_config 
+            WHERE pn = :pn 
+            ORDER BY created DESC 
+            LIMIT 1
+        """)
+        
+        try:
+            session = self.cds_session()  # 使用MySQL连接
+            result = session.execute(sql, {"pn": pn}).fetchone()
+            if result:
+                currency = result[1]  # currency字段
+                logger.info(f"查询到pn {pn} 对应的货币: {currency}")
+                return currency
+            else:
+                logger.warning(f"未找到pn {pn} 对应的货币配置")
+                return None
+        except Exception as e:
+            logger.error(f"查询货币配置失败 pn: {pn}, error: {e}")
+            return None
+        finally:
+            session.close()
 
 
 
