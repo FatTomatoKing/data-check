@@ -856,11 +856,11 @@ class CdapAdsValidation:
         wb.remove(wb.active)  # 删除默认sheet
 
         # 1. CDAP基础数据详情（带花费信息和day_recharge）
-        cdap_base_sheet = wb.create_sheet('CDAP-Roas报表查询结果明细')
+        cdap_base_sheet = wb.create_sheet('CDAP-ROAS趋势(同期群)')
         base_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
-            '花费美元（CDAP后台实际逻辑)', '原始花费（CDAP后台实际逻辑）', '花费美元（辅助检查使用）',
-            '花费原始币种（辅助检查使用）', '日充值美元（CDAP后台实际逻辑）', '日充值原始币种（CDAP后台实际逻辑）'
+            '花费美元（cdap后台实际逻辑统计时带channel)', '原始花费（cdap后台实际逻辑统计时带channel）', '花费美元（辅助检查使用统计时带channel）',
+            '花费原始币种（辅助检查使用统计时带channel）', '日充值美元（cdap后台实际逻辑）', '日充值原始币种（cdap后台实际逻辑）'
         ]
         cdap_base_sheet.append(base_headers)
 
@@ -908,7 +908,7 @@ class CdapAdsValidation:
                     cdap_base_sheet[f'I{info["start_row"]}'].alignment = alignment
 
         # 2. ADS后台数据详情
-        ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
+        ads_backend_sheet = wb.create_sheet('ADS-同期群ROAS')
         ads_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数（ads后台实际逻辑）',
              '花费美元（ads后台实际逻辑统计时未带channel）', '花费原始币种（ads后台实际逻辑统计时未带channel）',
