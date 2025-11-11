@@ -248,7 +248,7 @@ class CdapAdsValidation:
             
             # 重新构建行数据，添加花费信息和day_recharge信息
             # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, threshold_value
-            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, CDAP实际使用, 原始花费（CDAP实际使用）, 花费USD, 原始花费, 日充值美元, 日充值原始币种, 币种, 汇率, 额外系数, history_active_offset_days, threshold_value
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, CDAP实际使用, 原始花费（CDAP实际使用）, 花费USD, 原始花费, 日充值美元, 日充值原始币种
             
             reordered_row = []
             reordered_row.extend(row[:7])  # table_name 到 active
@@ -262,17 +262,6 @@ class CdapAdsValidation:
             reordered_row.append(cost_info['original_cost'])  # 原始花费
             reordered_row.append(recharge_conversion['cost_usd'])  # 日充值美元
             reordered_row.append(day_recharge)  # 日充值原始币种
-            
-            # 优先使用recharge_conversion的币种信息，如果没有则使用cost_info的
-            currency = recharge_conversion['currency'] if recharge_conversion['currency'] else cost_info['currency']
-            rate = recharge_conversion['rate'] if recharge_conversion['rate'] else cost_info['rate']
-            extra_rate = recharge_conversion['extra_rate'] if recharge_conversion['extra_rate'] else cost_info['extra_rate']
-            
-            reordered_row.append(currency)  # 币种
-            reordered_row.append(rate)  # 汇率
-            reordered_row.append(extra_rate)  # 额外系数
-            reordered_row.append(row[7])  # history_active_offset_days
-            reordered_row.append(row[9])  # threshold_value
             
             processed_results.append(tuple(reordered_row))
         
@@ -488,7 +477,7 @@ class CdapAdsValidation:
             
             # 重新构建行数据，调整字段顺序（保持明细数据结构，但不输出pn字段）
             # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, pn, threshold_value
-            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, 花费USD, 原始花费, 日充值美元, 日充值原始币种, 币种, 汇率, 额外系数, history_active_offset_days, threshold_value
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, 花费USD, 原始花费, 日充值美元, 日充值原始币种
             
             reordered_row = []
             reordered_row.extend(row[:7])  # table_name 到 active
@@ -497,17 +486,6 @@ class CdapAdsValidation:
             reordered_row.append(cost_info['original_cost'])  # 原始花费
             reordered_row.append(recharge_conversion['cost_usd'])  # 日充值美元
             reordered_row.append(day_recharge)  # 日充值原始币种
-            
-            # 优先使用recharge_conversion的币种信息，如果没有则使用cost_info的
-            currency = recharge_conversion['currency'] if recharge_conversion['currency'] else cost_info['currency']
-            rate = recharge_conversion['rate'] if recharge_conversion['rate'] else cost_info['rate']
-            extra_rate = recharge_conversion['extra_rate'] if recharge_conversion['extra_rate'] else cost_info['extra_rate']
-            
-            reordered_row.append(currency)  # 币种
-            reordered_row.append(rate)  # 汇率
-            reordered_row.append(extra_rate)  # 额外系数
-            reordered_row.append(row[7])  # history_active_offset_days
-            reordered_row.append(row[10])  # threshold_value (跳过pn字段)
             
             processed_results.append(tuple(reordered_row))
         
@@ -881,7 +859,7 @@ class CdapAdsValidation:
         cdap_base_sheet = wb.create_sheet('CDAP-Roas报表查询结果明细')
         base_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
-            'CDAP实际使用', '原始花费（CDAP实际使用）', '花费USD', '原始花费', '日充值美元', '日充值原始币种', '币种', '汇率', '额外系数', '历史活跃偏移天数', '阈值'
+            'CDAP实际使用', '原始花费（CDAP实际使用）', '花费USD', '原始花费', '日充值美元', '日充值原始币种'
         ]
         cdap_base_sheet.append(base_headers)
 
@@ -932,7 +910,7 @@ class CdapAdsValidation:
         ads_backend_sheet = wb.create_sheet('ADS后台数据详情')
         ads_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
-             '花费USD', '原始花费', '日充值美元', '日充值原始币种', '币种', '汇率', '额外系数', '历史活跃偏移天数', '阈值'
+             '花费USD', '原始花费', '日充值美元', '日充值原始币种'
         ]
         ads_backend_sheet.append(ads_headers)
 
@@ -965,8 +943,8 @@ class CdapAdsValidation:
 
             # 导出结果
             timestamp = int(time.time())
-            # output_filename = f'{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx' # 本地测试用
-            output_filename = f'/opt/cds/datas/{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'
+            output_filename = f'{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx' # 本地测试用
+            #output_filename = f'/opt/cds/datas/{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'
 
             self.export_to_excel(validation_results, output_filename)
 
