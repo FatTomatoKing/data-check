@@ -373,8 +373,9 @@ class CdapAdsValidation:
         logger.info(f"花费分配分组：共{len(group_map)}个分组")
         
         # 为每个分组计算花费（每个分组只计算一次）
-        group_costs = {}
-        channel_total_cost_cache = {}  # 缓存channel总花费，避免重复查询
+        group_costs_without_channel = {}  # 不带channel的花费
+        group_costs_with_channel = {}     # 带channel的花费
+        channel_total_cost_cache = {}     # 缓存channel总花费，避免重复查询
         
         for key, group_rows in group_map.items():
             base_row = group_rows[0]  # 使用第一行获取基本信息
@@ -405,10 +406,15 @@ class CdapAdsValidation:
                         'extra_rate': None
                     }
             
-            # 计算这个分组的花费 - 使用带channel条件的方法
-            cost_info = self.calculate_campaign_cost_with_channel_details(dates, campaign_id, channel, pn)
-            group_costs[key] = cost_info
-            logger.info(f"分组 {key} 花费计算: {cost_info['cost_usd']} USD")
+            # 计算这个分组的花费 - 不带channel条件的方法（原有逻辑）
+            cost_info_without_channel = self.calculate_campaign_cost_with_details(dates, campaign_id, pn)
+            group_costs_without_channel[key] = cost_info_without_channel
+            logger.info(f"分组 {key} 花费计算（不带channel）: {cost_info_without_channel['cost_usd']} USD")
+            
+            # 计算这个分组的花费 - 带channel条件的方法（新增逻辑）
+            cost_info_with_channel = self.calculate_campaign_cost_with_channel_details(dates, campaign_id, channel, pn)
+            group_costs_with_channel[key] = cost_info_with_channel
+            logger.info(f"分组 {key} 花费计算（带channel）: {cost_info_with_channel['cost_usd']} USD")
         
         # 处理每条明细记录（保持原始记录数量）
         processed_results = []
@@ -425,17 +431,29 @@ class CdapAdsValidation:
             # 处理花费信息：只有每个分组的第一条记录显示花费
             if is_first_record:
                 # 分组第一条记录：显示实际花费
-                cost_info = group_costs[key]
-                logger.info(f"分组 {key} 第一条明细记录，分配花费: {cost_info['cost_usd']} USD")
+                cost_info_without_channel = group_costs_without_channel[key]
+                cost_info_with_channel = group_costs_with_channel[key]
+                logger.info(f"分组 {key} 第一条明细记录，分配花费（不带channel）: {cost_info_without_channel['cost_usd']} USD")
+                logger.info(f"分组 {key} 第一条明细记录，分配花费（带channel）: {cost_info_with_channel['cost_usd']} USD")
             else:
                 # 分组后续记录：花费设置为0，但保持币种信息
-                original_cost_info = group_costs[key]
-                cost_info = {
+                original_cost_info_without_channel = group_costs_without_channel[key]
+                original_cost_info_with_channel = group_costs_with_channel[key]
+                
+                cost_info_without_channel = {
                     'cost_usd': 0.0,
                     'original_cost': 0.0,
-                    'currency': original_cost_info['currency'],
-                    'rate': original_cost_info['rate'],
-                    'extra_rate': original_cost_info['extra_rate']
+                    'currency': original_cost_info_without_channel['currency'],
+                    'rate': original_cost_info_without_channel['rate'],
+                    'extra_rate': original_cost_info_without_channel['extra_rate']
+                }
+                
+                cost_info_with_channel = {
+                    'cost_usd': 0.0,
+                    'original_cost': 0.0,
+                    'currency': original_cost_info_with_channel['currency'],
+                    'rate': original_cost_info_with_channel['rate'],
+                    'extra_rate': original_cost_info_with_channel['extra_rate']
                 }
                 logger.info(f"分组 {key} 后续明细记录，花费设置为0")
             
@@ -477,15 +495,23 @@ class CdapAdsValidation:
             
             # 重新构建行数据，调整字段顺序（保持明细数据结构，但不输出pn字段）
             # 原始数据：table_name, dates, bdates, channel, source, campaign_id, active, history_active_offset_days, day_recharge, pn, threshold_value
-            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, 花费USD, 原始花费, 日充值美元, 日充值原始币种
+            # 新顺序：table_name, dates, bdates, channel, source, campaign_id, active, 
+            #         花费USD（不带channel）, 原始花费（不带channel）, 花费USD（带channel）, 原始花费（带channel）, 日充值美元, 日充值原始币种
             
             reordered_row = []
             reordered_row.extend(row[:7])  # table_name 到 active
             
-            reordered_row.append(cost_info['cost_usd'])  # 花费USD
-            reordered_row.append(cost_info['original_cost'])  # 原始花费
-            reordered_row.append(recharge_conversion['cost_usd'])  # 日充值美元
-            reordered_row.append(day_recharge)  # 日充值原始币种
+            # 添加不带channel的花费信息
+            reordered_row.append(cost_info_without_channel['cost_usd'])      # 花费USD（不带channel）
+            reordered_row.append(cost_info_without_channel['original_cost']) # 原始花费（不带channel）
+            
+            # 添加带channel的花费信息
+            reordered_row.append(cost_info_with_channel['cost_usd'])         # 花费USD（带channel）
+            reordered_row.append(cost_info_with_channel['original_cost'])    # 原始花费（带channel）
+            
+            # 添加充值信息
+            reordered_row.append(recharge_conversion['cost_usd'])            # 日充值美元
+            reordered_row.append(day_recharge)                              # 日充值原始币种
             
             processed_results.append(tuple(reordered_row))
         
@@ -859,8 +885,8 @@ class CdapAdsValidation:
         cdap_base_sheet = wb.create_sheet('CDAP-ROAS趋势(同期群)')
         base_headers = [
             '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数',
-            '花费美元（cdap后台实际逻辑统计时带channel)', '原始花费（cdap后台实际逻辑统计时带channel）', '花费美元（辅助检查使用统计时带channel）',
-            '花费原始币种（辅助检查使用统计时带channel）', '日充值美元（cdap后台实际逻辑）', '日充值原始币种（cdap后台实际逻辑）'
+            '花费美元（cdap当前逻辑带channel)', '原始花费（cdap当前逻辑带channel）', '花费美元（辅助逻辑带channel）',
+            '花费原始币种（辅助逻辑带channel）', '日充值美元', '日充值原始币种'
         ]
         cdap_base_sheet.append(base_headers)
 
@@ -910,9 +936,9 @@ class CdapAdsValidation:
         # 2. ADS后台数据详情
         ads_backend_sheet = wb.create_sheet('ADS-同期群ROAS')
         ads_headers = [
-            '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数（ads后台实际逻辑）',
-             '花费美元（ads后台实际逻辑统计时未带channel）', '花费原始币种（ads后台实际逻辑统计时未带channel）',
-            '花费美元（统计时带channel）', '花费原始币种（统计时带channel）','日充值美元（ads后台实际逻辑）', '日充值原始币种（ads后台实际逻辑）'
+            '表名', '注册日期', '行为日期', '渠道', '来源', '广告系列id', '活跃用户数（ads）',
+             '花费美元（ads当前逻辑）', '花费原始币种（ads当前逻辑）',
+            '花费美元（ads正确逻辑）', '花费原始币种（ads正确逻辑）','日充值美元（ads）', '日充值原始币种（ads）'
         ]
         ads_backend_sheet.append(ads_headers)
 
