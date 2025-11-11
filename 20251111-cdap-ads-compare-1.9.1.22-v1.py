@@ -49,8 +49,8 @@ class CdapAdsValidation:
 
     def __init__(self):
         # 读取配置文件
-        with open('D:/code-py/pythonProject/db_config.json', 'r') as f:
-            # with open('db_config.json', 'r') as f:
+        # with open('/opt/cds/db_config.json', 'r') as f:
+        with open('db_config.json', 'r') as f:  # 本地用
             self.db_configs = json.load(f)
 
         # 初始化数据库连接
@@ -965,8 +965,8 @@ class CdapAdsValidation:
 
             # 导出结果
             timestamp = int(time.time())
-            output_filename = f'D:/code-py/pythonProject/{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'
-            # output_filename = f'{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'  # 本地测试用
+            # output_filename = f'{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx' # 本地测试用
+            output_filename = f'/opt/cds/datas/{dates}-cdap-ads-validation-detailed-{timestamp}.xlsx'
 
             self.export_to_excel(validation_results, output_filename)
 
